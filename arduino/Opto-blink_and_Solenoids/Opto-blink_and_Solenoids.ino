@@ -89,6 +89,14 @@ void loop() {
       led_state = LOW;
       digitalWrite(LED_PIN, led_state);
     }
+
+    //Write back out the values that have been sent to check that communication was successful
+    for (int j=0; j < NUM_FIELDS; j++) {
+      Serial.print(values[j]);
+      if (j < NUM_FIELDS-1) {
+        Serial.print(",");   
+      } 
+    }
   }
   unsigned long current_micros = micros();
   // Check if we're in LED blink mode or not
