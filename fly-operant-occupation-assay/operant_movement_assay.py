@@ -181,6 +181,12 @@ def video_capture(child_conn_obj, data_q_obj,
 
 def get_dist(a, b):
     return np.linalg.norm(a-b)
+    
+def get_disp_rate(a, b):
+    dist = get_dist(a[0], b[0])
+    dt = b[1] - a[1]
+    result = dist/dt
+    return result
 
 def preview_camera(calibration_data = None):   
     cam = cv2.VideoCapture(0)
@@ -268,22 +274,36 @@ class InitArduino:
         
         #Arduino state consists of 6 values (LED_freq,LED_PW,SOL1,SOL2,SOL3,SOL4)
         self.state = '0.00,0.00,0.00,0.00,0.00,0.00'
+        self.desired_state = None
         
         #Loop optimizations
         self.arduino_readline = self.arduino.readline
         self.np_fromstring = np.fromstring
-        
-    def update_state(self, new_state, roi_id):
-        #first convert state string of floats into numpy array
-        prior_state = self.np_fromstring(self.state, dtype=float, sep=',')
+    
+    #method used to determine a desired solenoid state
+    def update_desired_state(self, new_state, roi_id):
+        if self.desired_state:
+            prior_state = self.np_fromstring(self.desired_state, dtype=float, sep=',')
+        else:
+            #first convert state string of floats into numpy array
+            prior_state = self.np_fromstring(self.state, dtype=float, sep=',')
+            
         state_indx = roi_id + 1    
         
         if int(prior_state[state_indx] - new_state) != 0:
             prior_state[state_indx] = new_state         
-            new_state = ",".join(map(str, prior_state))        
-            self.write(new_state)
+            self.desired_state = ",".join(map(str, prior_state))        
+    
+    #method to tell Arduino to achieve the desired state
+    def write_desired_state(self):
+        if self.desired_state:
+            self.write(self.desired_state)
+            self.desired_state = None
+    
+    def report_state(self):
+        return self.np_fromstring(self.state, dtype=float, sep=',')
         
-    #Avoid using this method on its own, update_state() is far safer!!
+    #Avoid using this method on its own, update_desired_state()/write_desired_state() are far safer!!
     def write(self, values):
         self.arduino.write(values)
         self.state = self.arduino_readline()
@@ -311,6 +331,7 @@ class InitArduino:
         Note: Make sure to close serial connection when finished with arduino 
         otherwise subsequent attempts to connect to the arduino will be blocked!!
         '''
+        self.turn_off_solenoids()
         self.arduino.close()
 #%%
 
@@ -338,12 +359,14 @@ class Arena():
     4) A list of fly locations over time (fly_location_array)
     """
     def __init__(self, arena_label, arena_id, input_frame, get_occupancy_roi=False, 
+                 get_displacement=False,
                  write_video=False, debug_mode=False, fps_cap=30, use_arduino=False,
                  arduino_obj = None):
         self.name = arena_label
         self.write_video = write_video
         self.debug_mode = debug_mode
         self.get_occupancy_roi = get_occupancy_roi
+        self.get_displacement = get_displacement
         self.sample_frame = input_frame
         self.fps_cap = fps_cap
         self.arena_id = arena_id       
@@ -351,7 +374,7 @@ class Arena():
         self.use_arduino = use_arduino
         
         if use_arduino:
-            self.arduino_update_state = self.arduino.update_state
+            self.arduino_update_desired_state = self.arduino.update_desired_state
            
         #Prompt user for set up of the arena bounds
         roi_msg = "Press the 'n' key on your keyboard when you are happy\n with the region of interest for {}".format(self.name)
@@ -374,7 +397,7 @@ class Arena():
         self.fly_location_array = []
         self.last_fly_locations = deque(maxlen=2)
         self.last_displacement = deque(maxlen=1)    
-        self.last_rewd_contour_status = deque(maxlen=1)
+        self.last_rewd_status = deque(maxlen=1)
         
         self.bgs_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (4,4))  
                                                       
@@ -411,10 +434,6 @@ class Arena():
         filtered = cv2.medianBlur(fgmask,5)                     
         dilate = cv2.dilate(filtered, self.bgs_kernel)
         
-        #cv2.imshow('{} background subtracted'.format(self.name), fgmask) 
-        #cv2.imshow('{} median blur'.format(self.name), filtered)
-        #cv2.imshow('{} morphology'.format(self.name), dilate)
-        
         if self.debug_mode:
             cv2.imshow('{} background subtracted'.format(self.name), fgmask) 
             cv2.imshow('{} median blur'.format(self.name), filtered)
@@ -449,46 +468,71 @@ class Arena():
             if moments['m00'] > 0:
                 cx, cy = int(moments['m10']/moments['m00']), int(moments['m01']/moments['m00'])  
                 cv2.circle(cropped_copy, (cx, cy), 8, (255,255,255), thickness=1)
-    
-    #                        if use_arduino:
-    #                            if getattr(arduino, "is_on"):
-    #                                cv2.circle(cropped_copy, (cx, cy), 11, (0,0, 255), thickness=2)
-                                  
-                self.last_fly_locations.append(np.array([cx,cy])) 
+
+                self.last_fly_locations.append((np.array([cx,cy]), time_ellapsed)) 
                 
-                if self.get_occupancy_roi:                      
+                #---------- Code for if we want to do an occupancy ROI experiment ------------------
+                if self.get_occupancy_roi:                    
                     in_rewd = cv2.pointPolygonTest(self.occupancy_contour[0], (cx, cy), False)                         
                     #print "\n\ninPolygon test gives: {}\n\n".format(in_contour)                          
                     if in_rewd == 1:
-                        self.last_rewd_contour_status.append('True')
+                        
+                        cv2.circle(cropped_copy, (cx, cy), 11, (0,0, 255), thickness=2)
+                        self.last_rewd_status.append('True')
                         if self.debug_mode:
-                            print "The fly *IS* in the occupancy region!!"   
+                            print("The fly *IS* in the occupancy region!!")
                         
                         if self.use_arduino:
-                            self.arduino_update_state(1, self.arena_id)
+                            self.arduino_update_desired_state(1, self.arena_id)
                                                                                            
                             #if get_dist(occupancy_roi.roi[0]+obtained_rewards, occupancy_roi.roi[1]-obtained_rewards) > 5:                                          
                             #    occupancy_contour = create_rect_contour(occupancy_roi.roi[0]+obtained_rewards, occupancy_roi.roi[1]-obtained_rewards)
                     else:
-                        self.last_rewd_contour_status.append('False')                      
+                        self.last_rewd_status.append('False')                      
                         if self.debug_mode:
-                            print "The fly is *NOT* in the occupancy region!!"     
+                            print("The fly is *NOT* in the occupancy region!!")
                             
                         if self.use_arduino:
-                            self.arduino_update_state(0, self.arena_id)
-    
+                            self.arduino_update_desired_state(0, self.arena_id)
+                        
+                #---------- Code for if we want to do a movement based experiment -------------
+                elif self.get_displacement:
+                    try:
+                        displacement_rate = get_disp_rate(self.last_fly_locations[0], self.last_fly_locations[1])
+                        if displacement_rate >= 90:
+                            self.last_rewd_status.append('True')
+                            cv2.circle(cropped_copy, (cx, cy), 11, (0,0, 255), thickness=2)
+                            if self.debug_mode:
+                                print("The fly *IS* being rewarded!")
+                            if self.use_arduino:
+                                self.arduino_update_desired_state(1, self.arena_id)
+                        else:
+                            self.last_rewd_status.append('False')
+                            if self.debug_mode:
+                                print("The fly is *NOT* being rewarded")
+                            if self.use_arduino:
+                                self.arduino_update_desired_state(0, self.arena_id)
+                        
+                    except IndexError:
+                        self.last_rewd_status.append('N/A')
+                        pass
+                
+                #--------- If we're not doing either type of experiment just append an 'N/A' to status
                 else:
-                    self.last_rewd_contour_status.append('N/A')
+                    self.last_rewd_status.append('N/A')
                             
-                self.fly_location_array.append((time_ellapsed, cx, cy, self.last_rewd_contour_status[-1]))    
+                self.fly_location_array.append((time_ellapsed, cx, cy, self.last_rewd_status[-1]))    
             
             #use try instead of "if len(self.last_fly_locations) > 1:" as there is
             #less of a timecost incurred and the exception only occurs once!
             try:
-                dist = get_dist(self.last_fly_locations[0],self.last_fly_locations[1])
+                dist = get_dist(self.last_fly_locations[0][0],self.last_fly_locations[1][0])
+                displacement_rate = get_disp_rate(self.last_fly_locations[0], self.last_fly_locations[1])
                 self.last_displacement.append(dist)                       
                 if self.debug_mode:
-                    print "Fly's distance displaced from last detection is: {}".format(dist)                           
+                    print("Fly's distance displaced from last detection is: {}".format(dist))
+                    print("Fly dd/dt is: {}".format(displacement_rate))      
+                    print("Arduino status is: {}".format(self.arduino.report_state()))
             except IndexError:
                 pass
             
@@ -496,13 +540,16 @@ class Arena():
         else:                      
             try:
                 #We should assume that the current contour position is where the fly previously was
-                temp_cx, temp_cy = self.last_fly_locations[-1]            
-                cv2.circle(cropped_copy, (temp_cx, temp_cy), 8, (255,255,255), thickness=1)          
-                if self.last_rewd_contour_status:
-                    temp_rewd_contour_status = self.last_rewd_contour_status[-1]
+                temp_cx, temp_cy = self.last_fly_locations[-1][0]        
+                cv2.circle(cropped_copy, (temp_cx, temp_cy), 8, (255,255,255), thickness=1)      
+                        
+                if self.last_rewd_status:
+                    temp_rewd_status = self.last_rewd_status[-1]
+                    if temp_rewd_status == 'True':
+                        cv2.circle(cropped_copy, (temp_cx, temp_cy), 11, (0,0, 255), thickness=2)
                 else:
-                    temp_rewd_contour_status = "N/A"         
-                self.fly_location_array.append((time_ellapsed, temp_cx, temp_cy, temp_rewd_contour_status))        
+                    temp_rewd_status = "N/A"         
+                self.fly_location_array.append((time_ellapsed, temp_cx, temp_cy, temp_rewd_status))        
             except IndexError:
                 pass
         #Finally, regardless of whether there is a found contour or not we should
@@ -510,7 +557,7 @@ class Arena():
         try:
             #If the fly isn't moving, then we should stop updating the background subtractor
             #as we don't want the fly to become "background"
-            if self.last_displacement[0] <= 2.0:
+            if self.last_displacement[-1] <= 2.0:
                 self.bgs_learning_rate = 0
                 if self.debug_mode:
                     print "Learning rate is 0!\n\n"
@@ -529,26 +576,28 @@ class Arena():
     def write_data_out(self, save_path, filename):
         with open(os.path.join(save_path, "{}.csv".format(filename)), "wb") as outfile:
             writer = csv.writer(outfile)
-            writer.writerow(["Time Elapsed (sec)", "Fly x", "Fly y", "Fly in rewd region?"])
+            writer.writerow(["Time Elapsed (sec)", "Fly x", "Fly y", "Fly being rewarded?"])
             writer.writerows(self.fly_location_array)  
 
 #we can attach an optional profiler to figure out where and how to optimize
 #code efficiency
 #@profile
-def preprocess_and_track(preproc_dict, track_dict, arena_dict_keys, cropped_frame_list, time_stamp):   
+def preprocess_and_track(preproc_dict, track_dict, arena_dict_keys, cropped_frame_list, time_stamp, arduino_obj):   
     #pre-processing step. See: preproces_frame()
     preproc_output = [preproc_dict[key](cropped_frame_list[indx], time_stamp) for indx, key in enumerate(arena_dict_keys)]
     #tracking step. See: track()
     for indx, key in enumerate(arena_dict_keys):
         track_dict[key](preproc_output[indx])
+    if arduino_obj:
+        arduino_obj.write_desired_state()
     
 #%%
 def start_fly_tracking(expt_dur = 900, led_freq = 5, led_pw=5, fps_cap = 30, 
                        debug_mode=False, use_arduino = False, 
                        write_video = True, write_csv = False, num_arenas=4,
-                       define_occupancy_roi = True,
+                       define_occupancy_roi = False, movement_assay = False, 
                        cam_calib_file = "Camera_calibration_matrices.json",
-                       default_save_dir = "C:\\Users\\Mixologist\\Desktop\\Operant Occupancy Assay"):
+                       default_save_dir = "C:\\Users\\Mixologist\\Desktop\\Karen's Operant Data"):
     if use_arduino:
         try:
             arduino = InitArduino()
@@ -579,6 +628,7 @@ def start_fly_tracking(expt_dur = 900, led_freq = 5, led_pw=5, fps_cap = 30,
     #for each 'Arena()' class instance object
     arena_dict = {'Arena {}'.format(arena):Arena('Arena {}'.format(arena), arena, temp_frame, 
                                                  get_occupancy_roi=define_occupancy_roi, 
+                                                 get_displacement=movement_assay,
                                                  write_video=write_video, 
                                                  debug_mode=debug_mode, 
                                                  fps_cap=fps_cap, use_arduino=use_arduino,
@@ -664,7 +714,7 @@ def start_fly_tracking(expt_dur = 900, led_freq = 5, led_pw=5, fps_cap = 30,
 
             #------------------ Heavy Lifting functions ---------------------
             #The majority of processing time and power go into these two functions
-            preprocess_and_track(preproc_dict, track_dict, arena_dict_keys, cropped_frame_list, time_stamp)
+            preprocess_and_track(preproc_dict, track_dict, arena_dict_keys, cropped_frame_list, time_stamp, arduino)
                 
         k = cv2_waitKey(30) & 0xff
         if k == 27:
@@ -697,5 +747,7 @@ def start_fly_tracking(expt_dur = 900, led_freq = 5, led_pw=5, fps_cap = 30,
     cv2.destroyAllWindows()
     
 if __name__ == '__main__':    
-    start_fly_tracking(expt_dur = 1800, write_video=True, define_occupancy_roi=True, use_arduino=True, write_csv=True, num_arenas=4)
+    start_fly_tracking(expt_dur = 600, write_video=True, 
+                       define_occupancy_roi=True, movement_assay=False, 
+                       use_arduino=True, write_csv=True, num_arenas=4, debug_mode=True)
     

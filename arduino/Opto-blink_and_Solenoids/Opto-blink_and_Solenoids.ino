@@ -97,6 +97,8 @@ void loop() {
         Serial.print(",");   
       } 
     }
+    //Write out the final newline character denoting end of communication after writeloop is done
+    Serial.print("\n");
   }
   unsigned long current_micros = micros();
   // Check if we're in LED blink mode or not
