@@ -257,7 +257,7 @@ class InitArduino:
     The class is configured with methods to communicate with Arduinos 
     loaded with the "opto-blink" or "opto-blink_and_solenoid" sketches
     """
-    def __init__(self, port='COM4', baudrate=115200, timeout=0.02):
+    def __init__(self, port='COM5', baudrate=115200, timeout=0.03):
         #Initialize the arduino!
         #Doing it this way prevents the serial reset that occurs!
         self.arduino = serial.Serial()
@@ -266,7 +266,7 @@ class InitArduino:
         self.arduino.timeout = timeout
         self.arduino.setDTR(False)
         self.arduino.open()  
-        time.sleep(0.5)
+        time.sleep(0.1)
         #When serial connection is made, arduino opto-blink script sends an initial
         #"OFF" signal. We'll just read the line and empty the serial buffer
         self.arduino.readline()
@@ -290,7 +290,7 @@ class InitArduino:
             
         state_indx = roi_id + 1    
         
-        if int(prior_state[state_indx] - new_state) != 0:
+        if prior_state[state_indx] - new_state != 0:
             prior_state[state_indx] = new_state         
             self.desired_state = ",".join(map(str, prior_state))        
     
@@ -372,6 +372,7 @@ class Arena():
         self.arena_id = arena_id       
         self.arduino = arduino_obj
         self.use_arduino = use_arduino
+        self.write_csv = None
         
         if use_arduino:
             self.arduino_update_desired_state = self.arduino.update_desired_state
@@ -398,6 +399,7 @@ class Arena():
         self.last_fly_locations = deque(maxlen=2)
         self.last_displacement = deque(maxlen=1)    
         self.last_rewd_status = deque(maxlen=1)
+        self.displacement_history = deque(maxlen=10)
         
         self.bgs_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (4,4))  
                                                       
@@ -499,7 +501,10 @@ class Arena():
                 elif self.get_displacement:
                     try:
                         displacement_rate = get_disp_rate(self.last_fly_locations[0], self.last_fly_locations[1])
-                        if displacement_rate >= 90:
+                        self.displacement_history.append(displacement_rate)
+                        #if the average of the last 5 displacement rates was above the threshold
+                        #then reward the fly
+                        if np.mean(self.displacement_history) >= 50:
                             self.last_rewd_status.append('True')
                             cv2.circle(cropped_copy, (cx, cy), 11, (0,0, 255), thickness=2)
                             if self.debug_mode:
@@ -521,6 +526,8 @@ class Arena():
                 else:
                     self.last_rewd_status.append('N/A')
                             
+#                if self.write_csv:
+#                    self.update_csv((time_ellapsed, cx, cy, self.last_rewd_status[-1]))
                 self.fly_location_array.append((time_ellapsed, cx, cy, self.last_rewd_status[-1]))    
             
             #use try instead of "if len(self.last_fly_locations) > 1:" as there is
@@ -548,7 +555,10 @@ class Arena():
                     if temp_rewd_status == 'True':
                         cv2.circle(cropped_copy, (temp_cx, temp_cy), 11, (0,0, 255), thickness=2)
                 else:
-                    temp_rewd_status = "N/A"         
+                    temp_rewd_status = "N/A"       
+                    
+#                if self.write_csv:
+#                    self.update_csv((time_ellapsed, temp_cx, temp_cy, temp_rewd_status))
                 self.fly_location_array.append((time_ellapsed, temp_cx, temp_cy, temp_rewd_status))        
             except IndexError:
                 pass
@@ -578,6 +588,20 @@ class Arena():
             writer = csv.writer(outfile)
             writer.writerow(["Time Elapsed (sec)", "Fly x", "Fly y", "Fly being rewarded?"])
             writer.writerows(self.fly_location_array)  
+                       
+#    def init_csv(self, save_path, filename):
+#        with open(os.path.join(save_path, "{}.csv".format(filename)), "wb") as outfile:
+#            writer = csv.writer(outfile)
+#            writer.writerow(["Time Elapsed (sec)", "Fly x", "Fly y", "Fly being rewarded?"])
+#        
+#        self.outfile = open(os.path.join(save_path, "{}.csv".format(filename)), "ab")
+#            
+#    def update_csv(self, data):
+#        writer = csv.writer(self.outfile)
+#        writer.writerow(data)
+#        
+#    def close_csv(self):
+#        self.outfile.close()
 
 #we can attach an optional profiler to figure out where and how to optimize
 #code efficiency
@@ -586,7 +610,7 @@ def preprocess_and_track(preproc_dict, track_dict, arena_dict_keys, cropped_fram
     #pre-processing step. See: preproces_frame()
     preproc_output = [preproc_dict[key](cropped_frame_list[indx], time_stamp) for indx, key in enumerate(arena_dict_keys)]
     #tracking step. See: track()
-    for indx, key in enumerate(arena_dict_keys):
+    for indx, key in enumerate(arena_dict_keys): 
         track_dict[key](preproc_output[indx])
     if arduino_obj:
         arduino_obj.write_desired_state()
@@ -680,6 +704,11 @@ def start_fly_tracking(expt_dur = 900, led_freq = 5, led_pw=5, fps_cap = 30,
     #arduino.turn_on_stim(15, 5)
     #time.sleep(5)
     #arduino.turn_off_stim()
+    
+#    if write_csv:
+#        for key in arena_dict_keys:
+#            arena_dict[key].init_csv(save_path, "{} - {}".format(expt_start_date, key))
+#            arena_dict[key].write_csv = True
         
     parent_conn.send('Time:{}'.format(expt_start_date))      
     parent_conn.send('Start!')
@@ -730,15 +759,19 @@ def start_fly_tracking(expt_dur = 900, led_freq = 5, led_pw=5, fps_cap = 30,
             video_cap_process.terminate()
             break
 
+#    if write_csv:
+#        for key in arena_dict_keys:
+#            arena_dict[key].close_csv()
+            
+    if write_csv:
+        for key in arena_dict_keys:
+            arena_dict[key].write_data_out(save_path, "{} - {}".format(expt_start_date, key))
+
     #print fly_location_array
     if use_arduino:
         arduino.turn_off_stim()
         arduino.turn_off_solenoids()
         arduino.close()
-        
-    if write_csv:
-        for key in arena_dict_keys:
-            arena_dict[key].write_data_out(save_path, "{} - {}".format(expt_start_date, key))
             
     if write_video:
         for key in arena_dict_keys:
@@ -750,4 +783,3 @@ if __name__ == '__main__':
     start_fly_tracking(expt_dur = 600, write_video=True, 
                        define_occupancy_roi=True, movement_assay=False, 
                        use_arduino=True, write_csv=True, num_arenas=4, debug_mode=True)
-    

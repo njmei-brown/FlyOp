@@ -251,7 +251,7 @@ class InitArduino:
     The class is configured with methods to communicate with Arduinos 
     loaded with the "opto-blink" or "opto-blink_and_solenoid" sketches
     """
-    def __init__(self, port='COM4', baudrate=115200, timeout=0.02):
+    def __init__(self, port='COM7', baudrate=250000, timeout=0.02):
         #Initialize the arduino!
         #Doing it this way prevents the serial reset that occurs!
         self.arduino = serial.Serial()
