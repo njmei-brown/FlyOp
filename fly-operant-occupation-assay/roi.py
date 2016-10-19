@@ -2,15 +2,12 @@
 """
 Created on Fri May 15 10:52:03 2015
 
-Updated 8/11/15
-
 @author: Nicholas Mei
 
 Package so that the ROI and LINE classes are a separate import.
 
 Allows user to draw rectangular ROIs as well as 'beam crossing' lines.
 """
-import sys
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
@@ -53,28 +50,28 @@ class set_roi(object):
         self.released = True
         if self.roi_finalized is False:
             self.end_pos = np.array([event.xdata, event.ydata]) 
-
-            #filter out any "None" values
-            if self.end_pos[0] and self.end_pos[1]:        
+            try:
                 self.diff = (self.end_pos - self.start_pos)
                 self.rect.set_width(self.diff[0])
                 self.rect.set_height(self.diff[1])
                 self.rect.set_xy(self.start_pos)
                 self.ax.figure.canvas.draw()
+            except:
+                print("The mouse cursor went out of the canvas area! Please retry drawing the ROI!")
                   
     def on_mouse_motion(self, event):
         if self.roi_finalized is False:
             if self.released is False:
                 self.current_pos = np.array([event.xdata, event.ydata])
-                
-                #filter out any "None" values
-                if self.current_pos[0] and self.current_pos[1]:
+                try:
                     self.diff = (self.current_pos - self.start_pos)
                     self.rect.set_width(self.diff[0])
                     self.rect.set_height(self.diff[1])
                     self.rect.set_xy(self.start_pos)
                     self.ax.figure.canvas.draw()
-                
+                except:
+                    print("The mouse cursor went out of the canvas area! Please retry drawing the ROI!")
+                    
     def standardize_coords(self):
         """
         This function take the start and end coordinates selected by the user
@@ -104,7 +101,6 @@ class set_roi(object):
             plt.pause(0.0001)
             if self.roi_finalized is True:
                 print("ROI is finalized")
-                sys.stdout.flush()
                 break
           
 class set_line(object):
@@ -176,5 +172,4 @@ class set_line(object):
             plt.pause(0.0001)
             if self.roi_finalized is True:
                 print("ROI is finalized")
-                sys.stdout.flush()
                 break

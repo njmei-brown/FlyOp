@@ -24,7 +24,6 @@ Installing rpy2 and R
 import sys
 import os
 import math  
-
 import glob
 
 import numpy as np
@@ -36,10 +35,14 @@ import matplotlib.collections as mcoll
 import matplotlib.gridspec as gridspec
 import matplotlib.patches as mpatches
 
+#code to make .pdf versions of plots importable with illustrator
+import matplotlib as mpl
+mpl.rcParams['font.family'] = 'sans-serif'
+mpl.rcParams['font.sans-serif'] = 'Arial'
+mpl.rcParams['pdf.fonttype'] = 42
+
 from scipy.stats import gaussian_kde
-
 import rpy2.robjects as robjects
-
 import cv2
 
 #If we are using python 2.7 or under
@@ -51,7 +54,6 @@ if sys.version_info[0] < 3:
 elif sys.version_info[0] >= 3:
     import tkinter as tk
     import tkinter.filedialog as filedialog
-   
    
 #%%
 #Helper functions   
@@ -249,7 +251,6 @@ def plot_positions(path_to_data_dir=None, title=None):
  
 #%%
 #Quantitation/statistics and plotting of group averages
-
 def calculate_occupancy_statistics(path_to_data_dir=None):
     rois_to_analyze = ['Arena 1', 'Arena 2', 'Arena 3', 'Arena 4']
       
@@ -281,13 +282,13 @@ def calculate_occupancy_statistics(path_to_data_dir=None):
             roi_occupancy = np.append([False], roi_occupancy)
             roi_occupancy = np.append(roi_occupancy, [False])
                        
-            #subtract the roi_occupancy with roi_occupancy shifted by 1 timepoint as integers
-            #EX: F,F,F,F,T,T,T,T,T,F,F,F - F,F,F,F,F,T,T,T,T,T,F,F   
-            #    0,0,0,0,1,1,1,1,1,0,0,0 - 0,0,0,0,0,1,1,1,1,1,0,0 = 0,0,0,0,1,0,0,0,0,-1,0,0
+            # subtract the roi_occupancy with roi_occupancy shifted by 1 timepoint as integers
+            # EX: F,F,F,F,T,T,T,T,T,F,F,F - F,F,F,F,F,T,T,T,T,T,F,F   
+            #     0,0,0,0,1,1,1,1,1,0,0,0 - 0,0,0,0,0,1,1,1,1,1,0,0 = 0,0,0,0,1,0,0,0,0,-1,0,0
             diff = roi_occupancy.astype(int) - np.roll(roi_occupancy.astype(int), 1)      
             
-            #Remove inserted [False] elements at start and end so that 
-            #index of diff will line back up with "time_points"
+            # Remove inserted [False] elements at start and end so that 
+            # index of diff will line back up with "time_points"
             diff = np.delete(diff, 0)
             diff = np.delete(diff, -1)
             
@@ -338,8 +339,8 @@ def plot_train_test_occupancy_entries(train_df, test_df, title=None):
     train_occupancy_entries = train_df.loc['Occupancy ROI Entries'].values
     test_occupancy_entries = test_df.loc['Occupancy ROI Entries'].values
     
-    #Note about R wilcox.test - https://stat.ethz.ch/R-manual/R-devel/library/stats/html/wilcox.test.html
-    #if both x and y are given and paired is TRUE, a Wilcoxon signed rank test of the null that the distribution of x - y (in the paired two sample case) is symmetric about mu is performed.
+    # Note about R wilcox.test - https://stat.ethz.ch/R-manual/R-devel/library/stats/html/wilcox.test.html
+    # if both x and y are given and paired is TRUE, a Wilcoxon signed rank test of the null that the distribution of x - y (in the paired two sample case) is symmetric about mu is performed.
     wilcox_test = robjects.r['wilcox.test']
     p_val = wilcox_test(robjects.IntVector(train_occupancy_entries), robjects.IntVector(test_occupancy_entries), paired = True).rx2('p.value')[0]
     p_val_statement = "Day 1 vs. Day 2 Occupancy ROI Entries P-Value: {}".format(p_val)
