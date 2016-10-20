@@ -27,7 +27,7 @@ if sys.version_info[0] < 3:
     import tkFileDialog as filedialog
       
 #If we are using python 3.0 or above
-elif sys.version_info[0] > 3:
+elif sys.version_info[0] >= 3:
     import tkinter as tk
     import tkinter.filedialog as filedialog
 
@@ -279,7 +279,14 @@ class InitArduino:
         state_indx = roi_id + 1    
         
         if int(prior_state[state_indx] - new_state) != 0:
-            prior_state[state_indx] = new_state         
+            prior_state[state_indx] = new_state   
+            if roi_id == 4:
+                #first two values of prior_state should always be zero
+                #however if a serial communication collision occurs
+                #values can be offset
+                #We only want to write the proper values after other arena.track() instances have corrected errors
+                prior_state[0] = 0
+                prior_state[1] = 0
             new_state = ",".join(map(str, prior_state))        
             self.write(new_state)
         
@@ -346,11 +353,11 @@ class Arena():
         self.get_occupancy_roi = get_occupancy_roi
         self.sample_frame = input_frame
         self.fps_cap = fps_cap
-        self.arena_id = arena_id       
+        self.arena_id = arena_id #arena_id will start from 1 NOT 0       
         self.arduino = arduino_obj
         self.use_arduino = use_arduino
         
-        if use_arduino:
+        if self.use_arduino:
             self.arduino_update_state = self.arduino.update_state
            
         #Prompt user for set up of the arena bounds
@@ -422,7 +429,37 @@ class Arena():
             
         return (dilate, cropped_copy, time_ellapsed)
 
-    def track(self, preprocess_output):
+    def track(self, preprocess_output):   
+        
+        def check_roi_occupancy(cx, cy):
+            """
+            Function to check whether tracked fly position (cx, cy) is within
+            a user defined roi contour.
+            
+            Using the occupancy state, the function will then update the appropriate
+            solenoid state via the Arduino
+            
+            Returns 1 if the fly position is in the ROI contour, 0 if not
+            """
+            in_rewd = cv2.pointPolygonTest(self.occupancy_contour[0], (cx, cy), False)  
+            
+            if in_rewd == 1:
+                self.last_rewd_contour_status.append('True')              
+                if self.debug_mode:
+                    print "The fly *IS* in the occupancy region!!"                     
+                if self.use_arduino:
+                    self.arduino_update_state(in_rewd, self.arena_id)                                                              
+                #if get_dist(occupancy_roi.roi[0]+obtained_rewards, occupancy_roi.roi[1]-obtained_rewards) > 5:                                          
+                #    occupancy_contour = create_rect_contour(occupancy_roi.roi[0]+obtained_rewards, occupancy_roi.roi[1]-obtained_rewards)
+            else:
+                self.last_rewd_contour_status.append('False')                
+                if self.debug_mode:
+                    print "The fly is *NOT* in the occupancy region!!"             
+                if self.use_arduino:
+                    self.arduino_update_state(in_rewd, self.arena_id)           
+            return in_rewd
+        
+        in_roi = None
 
         dilate, cropped_copy, time_ellapsed = preprocess_output                 
         image, contours, hierarchy = cv2.findContours(dilate, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -449,33 +486,12 @@ class Arena():
             if moments['m00'] > 0:
                 cx, cy = int(moments['m10']/moments['m00']), int(moments['m01']/moments['m00'])  
                 cv2.circle(cropped_copy, (cx, cy), 8, (255,255,255), thickness=1)
-    
-    #                        if use_arduino:
-    #                            if getattr(arduino, "is_on"):
-    #                                cv2.circle(cropped_copy, (cx, cy), 11, (0,0, 255), thickness=2)
                                   
                 self.last_fly_locations.append(np.array([cx,cy])) 
                 
-                if self.get_occupancy_roi:                      
-                    in_rewd = cv2.pointPolygonTest(self.occupancy_contour[0], (cx, cy), False)                         
+                if self.get_occupancy_roi:                                            
                     #print "\n\ninPolygon test gives: {}\n\n".format(in_contour)                          
-                    if in_rewd == 1:
-                        self.last_rewd_contour_status.append('True')
-                        if self.debug_mode:
-                            print "The fly *IS* in the occupancy region!!"   
-                        
-                        if self.use_arduino:
-                            self.arduino_update_state(1, self.arena_id)
-                                                                                           
-                            #if get_dist(occupancy_roi.roi[0]+obtained_rewards, occupancy_roi.roi[1]-obtained_rewards) > 5:                                          
-                            #    occupancy_contour = create_rect_contour(occupancy_roi.roi[0]+obtained_rewards, occupancy_roi.roi[1]-obtained_rewards)
-                    else:
-                        self.last_rewd_contour_status.append('False')                      
-                        if self.debug_mode:
-                            print "The fly is *NOT* in the occupancy region!!"     
-                            
-                        if self.use_arduino:
-                            self.arduino_update_state(0, self.arena_id)
+                    in_roi = check_roi_occupancy(cx, cy)
     
                 else:
                     self.last_rewd_contour_status.append('N/A')
@@ -492,19 +508,43 @@ class Arena():
             except IndexError:
                 pass
             
-        #If no contour was found
+        #If no contour was found...
         else:                      
             try:
-                #We should assume that the current contour position is where the fly previously was
-                temp_cx, temp_cy = self.last_fly_locations[-1]            
-                cv2.circle(cropped_copy, (temp_cx, temp_cy), 8, (255,255,255), thickness=1)          
+                #We can pretty safely assume that the fly hasn't moved and reuse its last known location
+                cx, cy = self.last_fly_locations[-1]            
+                cv2.circle(cropped_copy, (cx, cy), 8, (255,255,255), thickness=1) 
+                #Check if we have previous reward statuses...
                 if self.last_rewd_contour_status:
-                    temp_rewd_contour_status = self.last_rewd_contour_status[-1]
+                    last_rewd_contour_status = self.last_rewd_contour_status[-1]
+                    temp_rewd_contour_status = last_rewd_contour_status          
+                    if last_rewd_contour_status == True:
+                        in_roi = 1
+                    else:
+                        in_roi = 0
                 else:
-                    temp_rewd_contour_status = "N/A"         
-                self.fly_location_array.append((time_ellapsed, temp_cx, temp_cy, temp_rewd_contour_status))        
+                    temp_rewd_contour_status = "N/A"                          
+                self.fly_location_array.append((time_ellapsed, cx, cy, temp_rewd_contour_status))        
             except IndexError:
-                pass
+                pass       
+        
+        if self.use_arduino:
+            arduino_state = np.fromstring(self.arduino.state, dtype=float, sep=',')
+            print arduino_state
+            #Check if arduino_state matches up with in_roi designation
+            #also check if arduino state has accidentally been corrupted
+            if arduino_state[self.arena_id + 1] != in_roi or arduino_state[0] != 0 or arduino_state[1] != 0:
+                self.arduino_update_state(in_roi, self.arena_id)
+                arduino_state = np.fromstring(self.arduino.state, dtype=float, sep=',')
+            
+            #If the Arduino solenoid is on, then draw a red circle around the fly
+            #Red circle should match up with fly presence in user defined ROI
+            if arduino_state[self.arena_id + 1] == 1:
+                try:
+                    cv2.circle(cropped_copy, (cx, cy), 11, (0,0, 255), thickness=2)
+                except:
+                    pass
+            
         #Finally, regardless of whether there is a found contour or not we should
         #always be updating the bg_subtractor learning rate
         try:
@@ -541,6 +581,7 @@ def preprocess_and_track(preproc_dict, track_dict, arena_dict_keys, cropped_fram
     #tracking step. See: track()
     for indx, key in enumerate(arena_dict_keys):
         track_dict[key](preproc_output[indx])
+        
     
 #%%
 def start_fly_tracking(expt_dur = 900, led_freq = 5, led_pw=5, fps_cap = 30, 
@@ -548,12 +589,13 @@ def start_fly_tracking(expt_dur = 900, led_freq = 5, led_pw=5, fps_cap = 30,
                        write_video = True, write_csv = False, num_arenas=4,
                        define_occupancy_roi = True,
                        cam_calib_file = "Camera_calibration_matrices.json",
-                       default_save_dir = "C:\\Users\\Mixologist\\Desktop\\Operant Occupancy Assay"):
+                       default_save_dir = "C:\\Users\\Mixologist\\Desktop\\Nick's Operant Experiments"):
     if use_arduino:
         try:
             arduino = InitArduino()
         except:
-            print "There was a problem connecting to the arduino!! Try restarting Python!"
+            print("There was a problem connecting to the arduino!! Try restarting Python!")
+            raise
     else:   
         arduino=None
   
@@ -585,8 +627,7 @@ def start_fly_tracking(expt_dur = 900, led_freq = 5, led_pw=5, fps_cap = 30,
                                                  arduino_obj=arduino)
                   for arena in xrange(1, 1+num_arenas)}
                       
-    arena_dict_keys = sorted(arena_dict.keys())
-    
+    arena_dict_keys = sorted(arena_dict.keys())  
     arena_roi_list = [arena_dict[key].arena_roi for key in arena_dict_keys]
        
     vid_params = []
@@ -697,5 +738,5 @@ def start_fly_tracking(expt_dur = 900, led_freq = 5, led_pw=5, fps_cap = 30,
     cv2.destroyAllWindows()
     
 if __name__ == '__main__':    
-    start_fly_tracking(expt_dur = 1800, write_video=True, define_occupancy_roi=True, use_arduino=True, write_csv=True, num_arenas=4)
+    start_fly_tracking(expt_dur = 600, write_video=True, define_occupancy_roi=True, use_arduino=True, write_csv=True, num_arenas=4)
     
