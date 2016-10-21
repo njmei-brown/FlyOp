@@ -19,7 +19,8 @@ import multiprocessing as mp
 import cv2
 import roi
 
-#from profilehooks import profile
+#import cProfile
+#profiler = cProfile.Profile()
 
  #If we are using python 2.7 or under
 if sys.version_info[0] < 3:
@@ -266,8 +267,8 @@ class InitArduino:
         self.arduino.readline()
         self.is_on = False
         
-        #Arduino state consists of 6 values (LED_freq,LED_PW,SOL1,SOL2,SOL3,SOL4)
-        self.state = '0.00,0.00,0.00,0.00,0.00,0.00'
+        #Arduino state consists of 6 values (LED_freq,LED_PW,SOL1,SOL2,SOL3,SOL4,SOL5,SOL6)
+        self.state = '0.00,0.00,0,0,0,0,0,0'
         
         #Loop optimizations
         self.arduino_readline = self.arduino.readline
@@ -275,40 +276,39 @@ class InitArduino:
         
     def update_state(self, new_state, roi_id):
         #first convert state string of floats into numpy array
-        prior_state = self.np_fromstring(self.state, dtype=float, sep=',')
-        state_indx = roi_id + 1    
+        prior_state = self.np_fromstring(self.state, dtype=float, sep=',')        
+        state_indx = roi_id + 1       
         
-        if int(prior_state[state_indx] - new_state) != 0:
+        if prior_state[state_indx] - new_state != 0:
             prior_state[state_indx] = new_state   
-            if roi_id == 4:
-                #first two values of prior_state should always be zero
-                #however if a serial communication collision occurs
-                #values can be offset
-                #We only want to write the proper values after other arena.track() instances have corrected errors
-                prior_state[0] = 0
-                prior_state[1] = 0
-            new_state = ",".join(map(str, prior_state))        
+            #first two values of prior_state should always be zero
+            #however if a serial communication collision occurs
+            #values can be offset
+            prior_state[0] = 0.00
+            prior_state[1] = 0.00
+            new_state = ",".join(map(str, prior_state))
             self.write(new_state)
         
     #Avoid using this method on its own, update_state() is far safer!!
     def write(self, values):
+        values = "["+values+"]"
         self.arduino.write(values)
         self.state = self.arduino_readline()
     
     def turn_on_stim(self, led_freq, led_dur):
-        self.arduino.write('{freq},{dur}'.format(freq=led_freq, dur=led_dur))
+        self.arduino.write('[{freq},{dur}]'.format(freq=led_freq, dur=led_dur))
         self.state = self.arduino_readline()
         #if str(arduino_state) == 'ON':
             #self.is_on = True
 
     def turn_off_stim(self):
-        self.arduino.write('0,0')
+        self.arduino.write('[0.00,0.00]')
         self.state = self.arduino_readline()
         #if str(arduino_state) == 'OFF':
             #self.is_on = False
         
     def turn_off_solenoids(self):
-        self.arduino.write('0,0,0,0,0,0')
+        self.arduino.write('[0.00,0.00,0,0,0,0,0,0]')
         self.state = self.arduino_readline()
             
     def close(self):
@@ -441,6 +441,8 @@ class Arena():
             
             Returns 1 if the fly position is in the ROI contour, 0 if not
             """
+            #cv2.pointPolygonTest returns 1 if cx,cy is in contour
+            #will return -1 otherwise
             in_rewd = cv2.pointPolygonTest(self.occupancy_contour[0], (cx, cy), False)  
             
             if in_rewd == 1:
@@ -452,14 +454,12 @@ class Arena():
                 #if get_dist(occupancy_roi.roi[0]+obtained_rewards, occupancy_roi.roi[1]-obtained_rewards) > 5:                                          
                 #    occupancy_contour = create_rect_contour(occupancy_roi.roi[0]+obtained_rewards, occupancy_roi.roi[1]-obtained_rewards)
             else:
+                in_rewd = 0
                 self.last_rewd_contour_status.append('False')                
                 if self.debug_mode:
                     print "The fly is *NOT* in the occupancy region!!"             
                 if self.use_arduino:
                     self.arduino_update_state(in_rewd, self.arena_id)           
-            return in_rewd
-        
-        in_roi = None
 
         dilate, cropped_copy, time_ellapsed = preprocess_output                 
         image, contours, hierarchy = cv2.findContours(dilate, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -478,21 +478,18 @@ class Arena():
             if len(contours) == 1:
                 contour = contours[0]
                 contour_area = cv2.contourArea(contour)           
-
             if self.debug_mode:
                 print "First contour in the given frame has area: {}".format(contour_area)            
-
+                
             moments = cv2.moments(contour)               
             if moments['m00'] > 0:
                 cx, cy = int(moments['m10']/moments['m00']), int(moments['m01']/moments['m00'])  
-                cv2.circle(cropped_copy, (cx, cy), 8, (255,255,255), thickness=1)
-                                  
+                cv2.circle(cropped_copy, (cx, cy), 8, (255,255,255), thickness=1)                                
                 self.last_fly_locations.append(np.array([cx,cy])) 
                 
                 if self.get_occupancy_roi:                                            
                     #print "\n\ninPolygon test gives: {}\n\n".format(in_contour)                          
-                    in_roi = check_roi_occupancy(cx, cy)
-    
+                    check_roi_occupancy(cx, cy)
                 else:
                     self.last_rewd_contour_status.append('N/A')
                             
@@ -518,25 +515,20 @@ class Arena():
                 if self.last_rewd_contour_status:
                     last_rewd_contour_status = self.last_rewd_contour_status[-1]
                     temp_rewd_contour_status = last_rewd_contour_status          
-                    if last_rewd_contour_status == True:
-                        in_roi = 1
-                    else:
-                        in_roi = 0
                 else:
-                    temp_rewd_contour_status = "N/A"                          
+                    in_rewd = cv2.pointPolygonTest(self.occupancy_contour[0], (cx, cy), False)                
+                    if in_rewd == 1:
+                        temp_rewd_contour_status = 'True'           
+                    else:
+                        temp_rewd_contour_status = 'False'
                 self.fly_location_array.append((time_ellapsed, cx, cy, temp_rewd_contour_status))        
             except IndexError:
                 pass       
         
         if self.use_arduino:
             arduino_state = np.fromstring(self.arduino.state, dtype=float, sep=',')
-            print arduino_state
-            #Check if arduino_state matches up with in_roi designation
-            #also check if arduino state has accidentally been corrupted
-            if arduino_state[self.arena_id + 1] != in_roi or arduino_state[0] != 0 or arduino_state[1] != 0:
-                self.arduino_update_state(in_roi, self.arena_id)
-                arduino_state = np.fromstring(self.arduino.state, dtype=float, sep=',')
             
+            print arduino_state
             #If the Arduino solenoid is on, then draw a red circle around the fly
             #Red circle should match up with fly presence in user defined ROI
             if arduino_state[self.arena_id + 1] == 1:
@@ -668,15 +660,13 @@ def start_fly_tracking(expt_dur = 900, led_freq = 5, led_pw=5, fps_cap = 30,
     #unpack the .track methods for each arena into a dictionary
     track_dict = {key: arena_dict[key].track for key in arena_dict_keys}
     
-    #arduino.turn_on_stim(15, 5)
-    #time.sleep(5)
-    #arduino.turn_off_stim()
-        
     parent_conn.send('Time:{}'.format(expt_start_date))      
     parent_conn.send('Start!')
     #give a bit of time for the child process to get started
     time.sleep(0.3)   
     prev_time_stamp = 0
+
+    #profiler.enable()
           
     while 1:
         time_stamp, cropped_frame_list = get_data_q()
@@ -707,7 +697,7 @@ def start_fly_tracking(expt_dur = 900, led_freq = 5, led_pw=5, fps_cap = 30,
             #The majority of processing time and power go into these two functions
             preprocess_and_track(preproc_dict, track_dict, arena_dict_keys, cropped_frame_list, time_stamp)
                 
-        k = cv2_waitKey(30) & 0xff
+        k = cv2_waitKey(1) & 0xff
         if k == 27:
             #let's close everything down
             parent_conn.send('Shutdown!')
@@ -720,6 +710,9 @@ def start_fly_tracking(expt_dur = 900, led_freq = 5, led_pw=5, fps_cap = 30,
             parent_conn.close()
             video_cap_process.terminate()
             break
+    
+    #profiler.disable()
+    #profiler.dump_stats("C:\\Stats.dmp")
 
     #print fly_location_array
     if use_arduino:
@@ -738,5 +731,5 @@ def start_fly_tracking(expt_dur = 900, led_freq = 5, led_pw=5, fps_cap = 30,
     cv2.destroyAllWindows()
     
 if __name__ == '__main__':    
-    start_fly_tracking(expt_dur = 600, write_video=True, define_occupancy_roi=True, use_arduino=True, write_csv=True, num_arenas=4)
+    start_fly_tracking(expt_dur = 600, write_video=True, define_occupancy_roi=True, use_arduino=True, write_csv=True, num_arenas=6)
     
