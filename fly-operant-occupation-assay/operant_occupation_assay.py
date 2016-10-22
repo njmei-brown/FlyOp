@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
 Created on Sun Jul 12 21:49:03 2015
@@ -13,6 +14,7 @@ import serial
 import csv
 from collections import deque
 
+import serial.tools.list_ports as lp
 import subprocess as sp
 import numpy as np
 import multiprocessing as mp
@@ -36,11 +38,21 @@ elif sys.version_info[0] >= 3:
 FFMPEG_BIN = u'C:/FFMPEG/bin/ffmpeg.exe'
 
 #%%
+def find_arduinos():
+    """
+    Function that scans serial ports to look for Arduinos
+    Returns a list containing 'COM' ports as strings
+    If an arduino is not found, return "None"
+    """    
+    ports = list(lp.comports())
 
+    return [port[0] for port in ports if "Arduino" in port[1]]
 
+#%% 
 def get_elapsed_time(start_time):
     return time.clock()-start_time  
     
+#%%
 def correct_distortion(input_frame, calib_mtx, calib_dist, crop_frame=False):
     """
     Function that applies correction for radial "fisheye" lens distortion
@@ -59,6 +71,7 @@ def correct_distortion(input_frame, calib_mtx, calib_dist, crop_frame=False):
        
     return corrected_frame
 
+#%%
 def crop_image(img, roi_object):
     """
     Function that crops an image according to roi coordinates of an roi_object
@@ -72,7 +85,8 @@ def crop_image(img, roi_object):
     cropped_img = img[start_pos[1]:end_pos[1], start_pos[0]:end_pos[0]]
                                 
     return cropped_img
-    
+
+#%%
 def init_video_writer(frame_width, frame_height, fps_cap, save_path, timestring, roi_name, encode_preset):
     fname = "video - {} - {}".format(timestring, roi_name)       
     ffmpeg_command = [ FFMPEG_BIN,
@@ -92,6 +106,7 @@ def init_video_writer(frame_width, frame_height, fps_cap, save_path, timestring,
     
     return video_writer  
 
+#%%
 def video_capture(child_conn_obj, data_q_obj, 
                   calib_mtx, calib_dist, fps_cap, 
                   roi_list, vid_params, save_path, write_video):
@@ -179,10 +194,12 @@ def video_capture(child_conn_obj, data_q_obj,
      for vid_writer in raw_video_writers:
          vid_writer.stdin.close()
          vid_writer.wait()
-
+         
+#%%
 def get_dist(a, b):
     return np.linalg.norm(a-b)
 
+#%%
 def preview_camera(calibration_data = None):   
     cam = cv2.VideoCapture(0)
     
@@ -201,7 +218,8 @@ def preview_camera(calibration_data = None):
             break          
     cam.release()
     cv2.destroyAllWindows()
-    
+
+#%%
 def choose_file(custom_text):
     root = tk.Tk()
     try:
@@ -211,7 +229,8 @@ def choose_file(custom_text):
     file_path = filedialog.askopenfilename(parent=root, title=custom_text)
     root.destroy()
     return file_path
-    
+
+#%%
 def load_cam_calib_file(filepath=None):
     """
     Function to read in a camera calibration file which contains the 
@@ -252,7 +271,14 @@ class InitArduino:
     The class is configured with methods to communicate with Arduinos 
     loaded with the "opto-blink" or "opto-blink_and_solenoid" sketches
     """
-    def __init__(self, port='COM7', baudrate=250000, timeout=0.02):
+    def __init__(self, port=None, baudrate=250000, timeout=0.02):
+        
+        if not port:
+            arduino_ports = find_arduinos()         
+            if arduino_ports:
+                port = arduino_ports[0]
+            else:
+                raise ValueError('Could not find an Arduino to connect to! Please check that an Arduino is connected!')
         #Initialize the arduino!
         #Doing it this way prevents the serial reset that occurs!
         self.arduino = serial.Serial()
@@ -564,16 +590,14 @@ class Arena():
             writer.writerow(["Time Elapsed (sec)", "Fly x", "Fly y", "Fly in rewd region?"])
             writer.writerows(self.fly_location_array)  
 
-#we can attach an optional profiler to figure out where and how to optimize
-#code efficiency
-#@profile
+            
+#%%
 def preprocess_and_track(preproc_dict, track_dict, arena_dict_keys, cropped_frame_list, time_stamp):   
     #pre-processing step. See: preproces_frame()
     preproc_output = [preproc_dict[key](cropped_frame_list[indx], time_stamp) for indx, key in enumerate(arena_dict_keys)]
     #tracking step. See: track()
     for indx, key in enumerate(arena_dict_keys):
-        track_dict[key](preproc_output[indx])
-        
+        track_dict[key](preproc_output[indx])     
     
 #%%
 def start_fly_tracking(expt_dur = 900, led_freq = 5, led_pw=5, fps_cap = 30, 
@@ -581,7 +605,7 @@ def start_fly_tracking(expt_dur = 900, led_freq = 5, led_pw=5, fps_cap = 30,
                        write_video = True, write_csv = False, num_arenas=4,
                        define_occupancy_roi = True,
                        cam_calib_file = "Camera_calibration_matrices.json",
-                       default_save_dir = "C:\\Users\\Mixologist\\Desktop\\Nick's Operant Experiments"):
+                       default_save_dir = None):
     if use_arduino:
         try:
             arduino = InitArduino()
@@ -731,5 +755,13 @@ def start_fly_tracking(expt_dur = 900, led_freq = 5, led_pw=5, fps_cap = 30,
     cv2.destroyAllWindows()
     
 if __name__ == '__main__':    
-    start_fly_tracking(expt_dur = 600, write_video=True, define_occupancy_roi=True, use_arduino=True, write_csv=True, num_arenas=6)
+    #Determine user Desktop path
+    #May fail horribly OS's that don't have a desktop!
+    userhome = os.path.expanduser('~')
+    desktop = userhome + '/Desktop/'
+    
+    start_fly_tracking(expt_dur = 600, write_video=True, 
+                       define_occupancy_roi=True, use_arduino=True, 
+                       write_csv=True, num_arenas=6,
+                       default_save_dir = "C:\\Users\\Mixologist\\Desktop\\Nick's Operant Experiments")
     
